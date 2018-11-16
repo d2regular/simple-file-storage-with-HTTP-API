@@ -8,6 +8,7 @@ from datetime import datetime
 from collections import namedtuple
 from tempfile import NamedTemporaryFile
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 
 ResponseStatus = namedtuple('HTTPStatus', 'code message')
 
@@ -32,7 +33,7 @@ SERVER_ADDRESS = ('127.0.0.1', 8080)
 
 def main():
     print('Http server is starting...')
-    httpd = HTTPServer(SERVER_ADDRESS, RequestsHandler)
+    httpd = ThreadingServer(SERVER_ADDRESS, RequestsHandler)
     print('Http server is running...')
     try:
         httpd.serve_forever()
@@ -94,6 +95,12 @@ def copyfile(in_stream, out_stream, content_len=None):
                 break
 
     return recorded_bytes
+
+
+class ThreadingServer(ThreadingMixIn, HTTPServer):
+    """An HTTP Server that handle each request in a new thread"""
+
+    daemon_threads = True
 
 
 class HTTPStatusError(Exception):
