@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-from hashlib import md5
+from hashlib import sha256
 from re import match
 from os import path, getcwd, mkdir, rmdir, remove, replace
 from io import BytesIO
@@ -25,7 +25,7 @@ HTTP_STATUS = {"OK": ResponseStatus(code=200, message="OK"),
                    ResponseStatus(code=500, message="Internal server error")}
 
 # buffer size that is used to hash, read, write files
-CHUNK_SIZE = 16 * 1024
+CHUNK_SIZE = 256 * 1024
 # path of directory where files are stored
 FILES_DIR = getcwd() + '/files/'
 SERVER_ADDRESS = ('127.0.0.1', 8080)
@@ -43,9 +43,9 @@ def main():
     print('Http server closes...')
 
 
-def md5_hash_hex(file):
-    """read file by chunks and return hash md5"""
-    data_hash = md5()
+def sha256_hash_hex(file):
+    """read file by chunks and return hash sha256"""
+    data_hash = sha256()
     if file.seekable():
         file.seek(0)
     while True:
@@ -166,7 +166,7 @@ class RequestsHandler(BaseHTTPRequestHandler):
                                                           url_path))
 
         try:
-            if match(r'^/v1/files/[0-9a-fA-F]{32}/?$', url_path):
+            if match(r'^/v1/files/[0-9a-fA-F]{64}/?$', url_path):
                 response = self.download_file()
                 self.send_headers(response.status, response.content_type,
                                   response.content_length)
@@ -197,7 +197,7 @@ class RequestsHandler(BaseHTTPRequestHandler):
                                                              url_path))
 
         try:
-            if match(r'^/v1/files/[0-9a-fA-F]{32}/?$', url_path):
+            if match(r'^/v1/files/[0-9a-fA-F]{64}/?$', url_path):
                 response = self.delete_file()
                 self.send_headers(response.status)
             else:
@@ -236,7 +236,7 @@ class RequestsHandler(BaseHTTPRequestHandler):
                 copyfile(self.rfile, payload, content_len)
                 payload.seek(0)
 
-                file_hash = md5_hash_hex(payload)
+                file_hash = sha256_hash_hex(payload)
                 payload.seek(0)
 
                 try:
