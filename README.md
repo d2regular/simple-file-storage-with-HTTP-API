@@ -8,7 +8,7 @@ The server stores only unique files. The uniqueness of a file is determined by t
 
 It is tested with Linux Mint 19, python 3.6.6
 
-
+NOTE: The server doesn't handle empty request body. If it happens then the server freezes.  It relates BaseHTTPRequestHandler. When rfile starts reading that it opens stream and wait data from client. If data does't come that server will be awaiting data.
 
 API description
 ---

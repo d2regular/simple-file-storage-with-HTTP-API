@@ -3,12 +3,12 @@
 from hashlib import sha256
 from re import match
 from os import path, getcwd, mkdir, rmdir, remove, replace
-from io import BytesIO
 from datetime import datetime
 from collections import namedtuple
 from tempfile import NamedTemporaryFile
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
+
 
 ResponseStatus = namedtuple('HTTPStatus', 'code message')
 
@@ -60,41 +60,14 @@ def date_now():
     return datetime.now().strftime('[%d/%b/%Y %H:%M:%S]')
 
 
-def copyfile(in_stream, out_stream, content_len=None):
-    """Copy data from in_stream to  out_stream by chunks.
-    Return number of recorded bytes"""
+def copyfile(in_stream, out_stream):
+    """Copy data from in_stream to  out_stream by chunks."""
 
-    recorded_bytes = 0
-
-    if content_len is not None:
-        if content_len < CHUNK_SIZE:
-            copied_bytes = in_stream.read(content_len)
-            out_stream.write(copied_bytes)
-            recorded_bytes = len(copied_bytes)
-        else:
-            # Data is copied by chunks. Since "rifle" allows to read only
-            # the exact number of bytes, so the length of the last chunk
-            # depends on the content_len
-            n = content_len // CHUNK_SIZE
-            for i in range(n):
-                copied_bytes = in_stream.read(CHUNK_SIZE)
-                out_stream.write(copied_bytes)
-                recorded_bytes += len(copied_bytes)
-            # record last chunk what less CHUNK_SIZE
-            end_bytes = content_len % CHUNK_SIZE
-            if end_bytes:
-                copied_bytes = in_stream.read(end_bytes)
-                out_stream.write(copied_bytes)
-                recorded_bytes += len(copied_bytes)
-    else:
-        while True:
-            copied_bytes = in_stream.read(CHUNK_SIZE)
-            out_stream.write(copied_bytes)
-            recorded_bytes += len(copied_bytes)
-            if len(copied_bytes) < CHUNK_SIZE:
-                break
-
-    return recorded_bytes
+    while True:
+        copied_bytes = in_stream.read(CHUNK_SIZE)
+        out_stream.write(copied_bytes)
+        if len(copied_bytes) < CHUNK_SIZE:
+            break
 
 
 class ThreadingServer(ThreadingMixIn, HTTPServer):
@@ -223,62 +196,76 @@ class RequestsHandler(BaseHTTPRequestHandler):
 
     def upload_file(self):
         """Upload file to server and return response data"""
-
         payload = None
-
         try:
-            str_content_len = self.headers['Content-Length']
-            content_len = int(str_content_len) if str_content_len else 0
-
-            if content_len:
-
-                payload = BytesIO()
-                copyfile(self.rfile, payload, content_len)
-                payload.seek(0)
-
-                file_hash = sha256_hash_hex(payload)
-                payload.seek(0)
-
+            if 'Content-Length' in self.headers:
                 try:
-                    mkdir(FILES_DIR)
-                except FileExistsError as err:
-                    print(err)
+                    content_len = int(self.headers['Content-Length'])
+                except ValueError:
+                    raise HTTPStatusError(HTTP_STATUS["BAD_REQUEST"],
+                                          "Wrong parameters")
+                if content_len:
 
-                file_dir = FILES_DIR + file_hash[:2] + '/'
-                file_path = file_dir + file_hash
+                    # create temp file which has constraint of buffer size
+                    payload = NamedTemporaryFile(dir=FILES_DIR,
+                                                 buffering=CHUNK_SIZE,
+                                                 delete=False)
 
-                if not path.exists(file_path):
+                    # use rfile.read1() instead rfile.read() since
+                    # rfile.read() allows to read only the exact
+                    # number of bytes
+                    while True:
+                        copied_bytes = self.rfile.read1(CHUNK_SIZE)
+                        payload.write(copied_bytes)
+                        if len(copied_bytes) < CHUNK_SIZE:
+                            break
+                    payload.seek(0)
+
+                    file_hash = sha256_hash_hex(payload)
+
                     try:
-                        mkdir(file_dir)
+                        mkdir(FILES_DIR)
                     except FileExistsError as err:
                         print(err)
 
-                    # protection against race condition
-                    # create temporary file then replace it with name file_path
-                    with NamedTemporaryFile(dir=FILES_DIR,
-                                            delete=False) as tf:
-                        copyfile(payload, tf)
-                        tf.flush()
-                        tmp_file = tf.name
+                    file_dir = FILES_DIR + file_hash[:2] + '/'
+                    file_path = file_dir + file_hash
+
+                    if not path.exists(file_path):
+                        try:
+                            mkdir(file_dir)
+                        except FileExistsError as err:
+                            print(err)
+                        # protection against race condition
+                        # replace temporary file with name file_path
+                        tmp_file = payload.name
                         replace(tmp_file, file_path)
 
-                    data = bytes(file_hash.encode('UTF-8'))
-                    content_len = len(data)
-                    return ResponseData(
-                        status=HTTP_STATUS['CREATED'],
-                        content_type='text/plain; charset=utf-8',
-                        content_length=content_len, data_stream=data)
+                        data = bytes(file_hash.encode('UTF-8'))
+                        content_len = len(data)
+                        return ResponseData(
+                            status=HTTP_STATUS['CREATED'],
+                            content_type='text/plain; charset=utf-8',
+                            content_length=content_len, data_stream=data)
 
-                return ResponseData(status=HTTP_STATUS['OK'])
-            else:
-                raise HTTPStatusError(HTTP_STATUS["BAD_REQUEST"],
-                                      "Wrong parameters")
+                    return ResponseData(status=HTTP_STATUS['OK'])
+
+            raise HTTPStatusError(HTTP_STATUS["BAD_REQUEST"],
+                                  "Wrong parameters")
+
         except OSError as err:
             raise HTTPStatusError(HTTP_STATUS["INTERNAL_SERVER_ERROR"],
                                   str(err))
         finally:
             if payload is not None:
-                payload.close()
+                try:
+                    remove(payload.name)
+                except OSError as err:
+                    if err.errno == 2:
+                        pass
+                    else:
+                        raise HTTPStatusError(
+                            HTTP_STATUS["INTERNAL_SERVER_ERROR"], str(err))
 
     def download_file(self):
         """If requested file exists return response data for downloading"""
@@ -287,25 +274,23 @@ class RequestsHandler(BaseHTTPRequestHandler):
         file_hash = url_path.split('/')[-1]
         file_dir = FILES_DIR + file_hash[:2] + '/'
         file_path = file_dir + file_hash
-        f = None
+        data_stream = None
 
         if path.exists(file_path):
             try:
-                f = open(file_path, 'br')
-                data_stream = BytesIO()
-                content_len = copyfile(f, data_stream)
-                data_stream.seek(0)
+                data_stream = open(file_path, 'br')
+                content_len = path.getsize(file_path)
                 return ResponseData(
                     status=HTTP_STATUS['OK'],
                     content_type='application/octet-stream',
                     content_length=content_len, data_stream=data_stream)
 
             except OSError as err:
+                if data_stream is not None:
+                    data_stream.close()
                 raise HTTPStatusError(HTTP_STATUS["INTERNAL_SERVER_ERROR"],
                                       str(err))
-            finally:
-                if f is not None:
-                    f.close()
+
         else:
             self.handle_not_found()
 
